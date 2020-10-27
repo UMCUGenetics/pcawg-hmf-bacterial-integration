@@ -1,0 +1,131 @@
+###
+### Author: Roel Janssen
+###
+
+##
+## Infer the donor_id from the filename.
+## ----------------------------------------------------------------------------
+PREFIX sg:          <https://sparqling-genomics.org/0.99.11/>
+PREFIX col:         <sg://0.99.11/table2rdf/Column/>
+
+INSERT {
+  GRAPH <temp://kraken-top10-annotations> {
+    ?row col:donor_id         ?donor_id .
+  }
+}
+WHERE {
+  GRAPH <temp://kraken-top10> {
+    ?row    sg:originatedFrom ?origin .
+    ?origin sg:filename       ?filename .
+
+    BIND (STRBEFORE(?filename, "T_") AS ?donor_id)
+  }
+}
+
+##
+## Write all pipeline5+KRAKEN2 findings and their corresponding PCAWG findings.
+## ----------------------------------------------------------------------------
+PREFIX col:         <sg://0.99.11/table2rdf/Column/>
+
+INSERT {
+  GRAPH <temp://pcawg-kraken-merged> {
+    ?row col:donor_id                ?donor_id .
+    ?row col:icgc_taxon_id           ?taxon_id .
+    ?row col:taxon_name              ?taxon_name .
+    ?row col:kraken_covered          ?kraken_covered .
+    ?row col:pcawg_supporting_reads  ?pcawg_supporting_reads .
+  }
+}
+WHERE {
+  GRAPH <temp://kraken-top10> {
+    ?row    col:ncbi_taxon_id      ?taxon_id .
+    ?row    col:fragments_covered  ?fragments_covered .
+  }
+  GRAPH <temp://kraken-top10-annotations> {
+    ?row    col:donor_id           ?donor_id .
+  }
+  GRAPH <temp://taxonomy> {
+    ?r2     col:tax_id             ?taxon_id .
+    ?r2     col:name               ?tax_name .
+  }
+
+  # Find the corresponding entry in the PCAWG findings.
+  OPTIONAL {
+    GRAPH <temp://pcawg-consensus-tumor-viral-integration> {
+      ?r3     col:icgc_donor_id              ?donor_id .
+      ?r3     col:ncbi_taxonid_genus         ?taxon_id .
+      ?r3     col:ncbi_taxname               ?alt_taxname .
+      ?r3     col:number_of_supporting_reads ?supporting_reads .
+    }
+  }
+
+  # Fill empty columns with pre-determined values.
+  BIND (COALESCE(?tax_name,          ?alt_taxname) AS ?taxon_name)
+  BIND (COALESCE(?fragments_covered, 0)            AS ?kraken_covered)
+  BIND (COALESCE(?supporting_reads,  0)            AS ?pcawg_supporting_reads)
+}
+
+##
+## Write the PCAWG findings without a corresponding pipeline5_KRAKEN2 finding.
+## ----------------------------------------------------------------------------
+
+PREFIX col:         <sg://0.99.11/table2rdf/Column/>
+
+INSERT {
+  GRAPH <temp://pcawg-kraken-merged> {
+    ?r3 col:donor_id                       ?donor_id .
+    ?r3 col:icgc_taxon_id                  ?taxon_id .
+    ?r3 col:taxon_name                     ?taxon_name .
+    ?r3 col:kraken_covered                 ?kraken_covered .
+    ?r3 col:pcawg_supporting_reads         ?pcawg_supporting_reads .
+  }
+}
+WHERE {
+  GRAPH <temp://pcawg-consensus-tumor-viral-integration> {
+    ?r3     col:icgc_donor_id              ?donor_id .
+    ?r3     col:ncbi_taxonid_genus         ?taxon_id .
+    ?r3     col:ncbi_taxname               ?alt_taxname .
+    ?r3     col:number_of_supporting_reads ?supporting_reads .
+  }
+
+  OPTIONAL {
+    GRAPH <temp://kraken-top10> {
+      ?row    col:ncbi_taxon_id      ?taxon_id .
+      ?row    col:fragments_covered  ?fragments_covered .
+    }
+    GRAPH <temp://kraken-top10-annotations> {
+      ?row    col:donor_id           ?donor_id .
+    }
+    GRAPH <temp://taxonomy> {
+      ?r2     col:tax_id             ?taxon_id .
+      ?r2     col:name               ?tax_name .
+    }
+  }
+
+  # Only include overlap between the PCAWG findings and our KRAKEN2 top 10 output.
+  FILTER (!BOUND(?fragments_covered))
+
+  # Fill empty columns with pre-determined values.
+  BIND (COALESCE(?tax_name,          ?alt_taxname) AS ?taxon_name)
+  BIND (COALESCE(?fragments_covered, 0)            AS ?kraken_covered)
+  BIND (COALESCE(?supporting_reads,  0)            AS ?pcawg_supporting_reads)
+}
+
+##
+## Produce the merged table.
+## ----------------------------------------------------------------------------
+PREFIX col:         <sg://0.99.11/table2rdf/Column/>
+
+SELECT DISTINCT ?donor_id ?taxon_id ?taxon_name ?kraken_covered ?pcawg_supporting_reads
+WHERE {
+  GRAPH <temp://pcawg-kraken-merged> {
+    ?row col:donor_id               ?donor_id .
+    ?row col:icgc_taxon_id          ?taxon_id .
+    ?row col:taxon_name             ?taxon_name .
+    ?row col:kraken_covered         ?kraken_covered .
+    ?row col:pcawg_supporting_reads ?pcawg_supporting_reads .
+  }
+
+  # Do not include human reads.
+  FILTER (?taxon_id != 9605)
+}
