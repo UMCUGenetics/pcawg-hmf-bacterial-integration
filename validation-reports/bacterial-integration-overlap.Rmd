@@ -16,45 +16,36 @@ knitr::opts_chunk$set(echo = TRUE)
 
 To execute the query, we need to load `RCurl`, and to parse the results, we need `jsonlite`.
 
-```{r echo=T, eval=FALSE, results='hide'}
+```{r echo=TRUE, results='hide'}
 library(RCurl, quietly=TRUE)
 library(jsonlite, quietly=TRUE)
-```
+library(ggplot2, quietly=TRUE)
 
-Furthermore, we need to obtain a `token` and the `projectId` from the SPARQLing-genomics endpoint:
-
-```{r,echo=T,eval=FALSE,results='hide'}
+# Interact with SPARQLing-genomics
 token     <- Sys.getenv("SG_TOKEN")
 projectId <- "665d953ae62d3323385cb79f652949b1b09f6227ce74c87d2e63c2b6ee4b12a0"
-query     <- "PREFIX col: <sg://0.99.11/table2rdf/Column/>
-PREFIX sg:  <https://sparqling-genomics.org/0.99.11/>
+query     <- "PREFIX col:         <sg://0.99.11/table2rdf/Column/>
 
-SELECT DISTINCT STR(?donor_id) AS ?donor ?taxonid ?reads ?fragments
+SELECT DISTINCT ?donor_id ?taxon_id ?taxon_name ?kraken_covered ?pcawg_supporting_reads
 WHERE {
-  GRAPH <temp://pcawg-consensus-tumor-bacterial-integration> {
-    ?r1 col:icgc_donor_id              ?donor_id ;
-        col:ncbi_taxonid_genus         ?taxonid ;
-        col:number_of_supporting_reads ?reads .
+  GRAPH <temp://pcawg-kraken-merged> {
+    ?r col:donor_id                ?donor_id .
+    ?r col:icgc_taxon_id           ?taxon_id .
+    ?r col:taxon_name              ?taxon_name .
+    ?r col:kraken_covered          ?kraken_covered .
+    ?r col:pcawg_supporting_reads  ?pcawg_supporting_reads .
   }
 
-  GRAPH <temp://pipeline5-kraken-tumor-bacterial-integration> {
-    ?r2 col:icgc_donor_id              ?donor_id2 ;
-        col:ncbi_taxon_id              ?taxonid ;
-        col:fragments_covered          ?fragments .
-  }
-
-  FILTER (STR(?donor_id) = ?donor_id2)
-  FILTER (?fragments > 0)
+  # Do not include human reads.
+  FILTER (?taxon_id != 9605)
 }
-ORDER BY DESC(?donor_id)"
-```
+ORDER BY DESC(?donor_id)
+"
 
-Use RCurl to perform the query:
-
-```{r,echo=T,eval=FALSE,results='hide'}
+# Use RCurl to perform the query:
 accumulator <- basicTextGatherer()
-endpoint    <- "https://node2.sparqling-genomics.org/sparql"
-cookie      <- paste0("SGSession=", token, sep="")
+endpoint    <- "https://node1.sparqling-genomics.org/sparql"
+cookie      <- paste0("SGSession=", token)
 
 accumulator$reset()
 curlPerform(url           = paste0(endpoint, "?project-id=", projectId),
@@ -66,57 +57,46 @@ curlPerform(url           = paste0(endpoint, "?project-id=", projectId),
             writefunction = accumulator$update)
 
 jsonData    <- accumulator$value()
+
+# Parse the results with "jsonlite".
+results     <- fromJSON(jsonData)
 ```
-
-Parse the data with `jsonlite`:
-
-```{r, echo=TRUE, eval=FALSE, results='hide'}
-results <- fromJSON(jsonData)
-```
-
-## Comparing reported supporting reads from PCAWG with supporting reads found by pipeline5 KRAKEN2
-
-```{r echo=T, results='hide'}
-library(ggplot2, quietly=TRUE)
-library(reshape2, quietly=TRUE)
-data <- melt(results[,c("donor", "fragments", "reads")])
-plot <- ggplot(data = data, aes(fill=variable, y=value, x=donor))  +
-          geom_bar(stat="identity", position = "dodge")            +
-          theme(axis.text.x=element_text(angle = 90, vjust = 0.5)) +
-          labs (title = "No. fragments vs no. reads.")             +
-          ylab("Number of fragments/reads")                        +
-          xlab("Donor")
-```
-
-```{r echo=F, results='show'}
-plot
-```
-
 
 ## Linear regression
 
 ```{r echo=TRUE, results='hide'}
-data         <- results[,c("taxon_name", "fragments", "reads")]
+data                 <- results[,c("taxon_name", "kraken_covered",
+                                   "pcawg_supporting_reads")]
+```
 
-data$fragments_log10 <- log(data$fragments, base=10)
-data$reads_log10 <- log(data$reads, base=10)
-data$taxonid <- as.factor(data$taxon_name)
+Remove data points not found in one of the two sets.
+
+```{r echo=TRUE, results='hide'}
+data <- subset(data, data$kraken_covered != 0)
+data <- subset(data, data$pcawg_supporting_reads != 0)
+```
+
+```{r}
+data$fragments_log10 <- log(data$kraken_covered, base=10)
+data$reads_log10     <- log(data$pcawg_supporting_reads, base=10)
+data$taxonid         <- as.factor(data$taxon_name)
+```
+
+```{r echo=TRUE, results='hide'}
 fit          <- lm(fragments_log10 ~ reads_log10, data = data)
-
 r_squared    <- summary(fit)$adj.r.squared
 intercept    <- fit$coef[[1]]
 slope        <- fit$coef[[2]]
 p_value      <- summary(fit)$coef[2,4]
-
 title        <- sprintf("Adj. R2 = %.5f, Int. = %.5f, Slope = %.5f, P = %.5f",
                      r_squared, intercept, slope, p_value)
 
-plot         <- ggplot(data, aes(x = fragments_log10, y = reads_log10))      +
+plot         <- ggplot(data, aes(x = reads_log10, y = fragments_log10))      +
                     geom_point(aes(colour=taxon_name),size=2)                +
                     stat_smooth(method = "lm", col = "#ca0020")              +
                     labs(title = title)                                      +
-                    xlab(c("pipeline 5 fragment support"))                   +
-                    ylab(c("PCAWG read support"))
+                    ylab(c("pipeline 5 fragment support"))                   +
+                    xlab(c("PCAWG read support"))
 ```
 
 ```{r echo=FALSE, results='show'}
@@ -125,21 +105,13 @@ plot
 
 ```{r, results='hide', echo=FALSE}
 # This cleans up the environment and enforces a round of garbage collection.
-remove (list = ls())
-gc(verbose = FALSE, reset = TRUE, full = TRUE)
+#remove (list = ls())
+#gc(verbose = FALSE, reset = TRUE, full = TRUE)
 ```
 
 ## Overlap pipeline5/KRAKEN2 output with PCAWG findings
-
-```{r, eval=TRUE, echo=FALSE, results='hide'}
-# Well, we just cleaned up, but we need the following:
-library(RCurl, quietly=TRUE)
-library(jsonlite, quietly=TRUE)
-token     <- Sys.getenv("SG_TOKEN")
-projectId <- "665d953ae62d3323385cb79f652949b1b09f6227ce74c87d2e63c2b6ee4b12a0"
-```
-
-```{r}
+<!--
+```{r, eval=TRUE, results='hide'}
 query <- "PREFIX col:         <sg://0.99.11/table2rdf/Column/>
 
 SELECT DISTINCT ?donor_id ?taxon_id ?taxon_name 
@@ -173,6 +145,7 @@ curlPerform(url           = paste0(endpoint, "?project-id=", projectId),
 jsonData    <- accumulator$value()
 results     <- fromJSON(jsonData)
 ```
+-->
 
 ```{r echo=TRUE, results='hide'}
 data                 <- results[,c("taxon_name", "kraken_covered", 
@@ -198,12 +171,12 @@ title        <- sprintf("Adj. R2 = %.5f, Int. = %.5f, Slope = %.5f, P = %.5f",
 ```
 
 ```{r, echo=TRUE, results='hide', fig.width=30, fig.height=15}
-plot         <- ggplot(data, aes(x = fragments_log10, y = reads_log10))      +
+plot         <- ggplot(data, aes(x = reads_log10, y = fragments_log10))      +
                     geom_point(aes(colour=taxon_name),size=2)                +
                     stat_smooth(method = "lm", col = "#ca0020")              +
                     labs(title = title)                                      +
-                    xlab(c("pipeline 5 fragment support"))                   +
-                    ylab(c("PCAWG read support"))
+                    ylab(c("pipeline 5 fragment support"))                   +
+                    xlab(c("PCAWG read support"))
 
 plot
 ```
